@@ -21,6 +21,7 @@ changelog:
 - 0.2.3 - Memory optimization to prevent OOM errors
 - 0.2.4 - Move all hard-coded values to constants
 - 0.2.5 - Code structure improvements: search type enum, and better error handling
+- 0.2.6 - Add terms splitting option
 """
 
 import base64
@@ -586,10 +587,12 @@ class Confluence:
                 f"Network error when connecting to Confluence: {str(e)}"
             )
 
-    def _build_search_query(self, query: str, field: Optional[str] = None) -> str:
+    def _build_search_query(
+        self, query: str, field: Optional[str] = None, split_terms: bool = True
+    ) -> str:
         """Builds a CQL search query from keywords, optionally limiting to specific fields"""
         terms = query.split()
-        if not terms:
+        if not terms or not split_terms:
             if field:
                 return f'{field} ~ "{query}"'
             return f'text ~ "{query}" OR title ~ "{query}"'
@@ -604,34 +607,25 @@ class Confluence:
         return cql_terms
 
     def search_confluence(
-        self, query: str, search_type: SearchType, limit: int = 5
+        self,
+        query: str,
+        search_type: SearchType,
+        limit: int = 5,
+        split_terms: bool = True,
     ) -> List[str]:
         """Unified search method using the search type enum"""
         endpoint = "content/search"
 
         if search_type == SearchType.TITLE:
-            cql_terms = self._build_search_query(query, "title")
+            cql_terms = self._build_search_query(query, "title", split_terms)
         elif search_type == SearchType.CONTENT:
-            cql_terms = self._build_search_query(query, "text")
+            cql_terms = self._build_search_query(query, "text", split_terms)
         else:  # TITLE_AND_CONTENT
-            cql_terms = self._build_search_query(query)
+            cql_terms = self._build_search_query(query, split_terms=split_terms)
 
         params = {"cql": f'({cql_terms}) AND type="page"', "limit": limit}
         raw_response = self.get(endpoint, params)
         return [item["id"] for item in raw_response.get("results", [])]
-
-    # Legacy methods maintained for backward compatibility
-    def search_by_title(self, query: str, limit: int = 5) -> List[str]:
-        """Search Confluence pages by title, returning page IDs"""
-        return self.search_confluence(query, SearchType.TITLE, limit)
-
-    def search_by_content(self, query: str, limit: int = 5) -> List[str]:
-        """Search Confluence pages by content, returning page IDs"""
-        return self.search_confluence(query, SearchType.CONTENT, limit)
-
-    def search_by_title_and_content(self, query: str, limit: int = 5) -> List[str]:
-        """Search Confluence pages by both title and content, returning page IDs"""
-        return self.search_confluence(query, SearchType.TITLE_AND_CONTENT, limit)
 
     def get_page(self, page_id: str) -> Dict[str, str]:
         """Get a specific Confluence page by ID"""
@@ -776,6 +770,10 @@ class Tools:
             "",
             description="API key or personal access token; leave empty to use the default settings.",
         )
+        split_terms: bool = Field(
+            True,
+            description="Split search query into words for better search results.",
+        )
         pass
 
     # Get content from Confluence
@@ -807,10 +805,12 @@ class Tools:
                 api_key_auth = user_valves.api_key_auth
                 api_username = user_valves.username or self.valves.username
                 api_key = user_valves.api_key or self.valves.api_key
+                split_terms = user_valves.split_terms
             else:
                 api_username = self.valves.username
                 api_key = self.valves.api_key
                 api_key_auth = True
+                split_terms = True
 
             if (api_key_auth and not api_username) or not api_key:
                 await event_emitter.emit_status(
@@ -873,7 +873,7 @@ class Tools:
             # Search using the Confluence API
             try:
                 searchResponse = confluence.search_confluence(
-                    query, search_type, self.valves.api_result_limit
+                    query, search_type, self.valves.api_result_limit, split_terms
                 )
             except ConfluenceAPIError as e:
                 await event_emitter.emit_status(
