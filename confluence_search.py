@@ -6,7 +6,7 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn, psutil
-version: 0.2.3
+version: 0.2.5
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
@@ -20,6 +20,7 @@ changelog:
 - 0.2.2 - Fix confusion between Confluence API limit and RAG parameters
 - 0.2.3 - Memory optimization to prevent OOM errors
 - 0.2.4 - Move all hard-coded values to constants
+- 0.2.5 - Code structure improvements: search type enum, and better error handling
 """
 
 import base64
@@ -28,6 +29,7 @@ import requests
 import asyncio
 import numpy as np
 import os
+from enum import Enum
 from typing import Awaitable, Callable, Dict, List, Any, Optional, Iterable
 from pydantic import BaseModel, Field
 from markdownify import markdownify
@@ -82,6 +84,49 @@ DEFAULT_BASE_URL = "https://example.atlassian.net/wiki"
 DEFAULT_USERNAME = "example@example.com"
 DEFAULT_API_KEY = "ABCD1234"
 DEFAULT_API_RESULT_LIMIT = 5
+
+
+# Custom exceptions for better error handling
+class ConfluenceError(Exception):
+    """Base exception for Confluence-related errors"""
+
+    pass
+
+
+class ConfluenceAuthError(ConfluenceError):
+    """Authentication error for Confluence API"""
+
+    pass
+
+
+class ConfluenceAPIError(ConfluenceError):
+    """API error for Confluence endpoints"""
+
+    pass
+
+
+class ConfluenceModelError(ConfluenceError):
+    """Error related to embedding models"""
+
+    pass
+
+
+# Define an enum for search types
+class SearchType(str, Enum):
+    """Enum for possible Confluence search types"""
+
+    TITLE = "title"
+    CONTENT = "content"
+    TITLE_AND_CONTENT = "title_and_content"
+
+    @classmethod
+    def from_string(cls, search_type: str) -> "SearchType":
+        """Convert string to SearchType enum with error handling"""
+        try:
+            return cls(search_type.lower())
+        except ValueError:
+            # Default to title and content if invalid
+            return cls.TITLE_AND_CONTENT
 
 
 @dataclass
@@ -221,7 +266,9 @@ def cosine_similarity(X, Y) -> np.ndarray:
     # Ignore divide by zero errors run time warnings as those are handled below.
     with np.errstate(divide="ignore", invalid="ignore"):
         similarity = np.dot(X, Y.T) / np.outer(X_norm, Y_norm)
-    similarity[np.isnan(similarity) | np.isinf(similarity)] = DEFAULT_SIMILARITY_FALLBACK
+    similarity[np.isnan(similarity) | np.isinf(similarity)] = (
+        DEFAULT_SIMILARITY_FALLBACK
+    )
     return similarity
 
 
@@ -299,7 +346,9 @@ class DenseRetriever:
 
         # Remove duplicative content
         included_idxs = filter_similar_embeddings(
-            relevant_doc_embeddings, cosine_similarity, threshold=DEFAULT_DUPLICATE_THRESHOLD
+            relevant_doc_embeddings,
+            cosine_similarity,
+            threshold=DEFAULT_DUPLICATE_THRESHOLD,
         )
         relevant_doc_embeddings = relevant_doc_embeddings[included_idxs]
 
@@ -517,65 +566,72 @@ class Confluence:
     ):
         self.base_url = base_url
         self.headers = self.authenticate(username, api_key, api_key_auth)
-        pass
 
     def get(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Make a GET request to the Confluence API"""
         url = f"{self.base_url}/rest/api/{endpoint}"
-        response = requests.get(url, params=params, headers=self.headers)
-        if not response.ok:
-            raise Exception(f"Failed to get data from Confluence: {response.text}")
-        return response.json()
+        try:
+            response = requests.get(url, params=params, headers=self.headers)
+            if response.status_code == 401:
+                raise ConfluenceAuthError(
+                    "Authentication failed. Check your credentials."
+                )
+            elif not response.ok:
+                raise ConfluenceAPIError(
+                    f"Failed to get data from Confluence: {response.text}"
+                )
+            return response.json()
+        except requests.RequestException as e:
+            raise ConfluenceAPIError(
+                f"Network error when connecting to Confluence: {str(e)}"
+            )
 
-    def search_by_title(self, query: str, limit: int = 5) -> List[str]:
-        """Search Confluence pages by title, returning page IDs"""
-        endpoint = "content/search"
-        # Make each word optional to improve search results
+    def _build_search_query(self, query: str, field: Optional[str] = None) -> str:
+        """Builds a CQL search query from keywords, optionally limiting to specific fields"""
         terms = query.split()
-        if terms:
-            cql_terms = " OR ".join([f'title ~ "{term}"' for term in terms])
+        if not terms:
+            if field:
+                return f'{field} ~ "{query}"'
+            return f'text ~ "{query}" OR title ~ "{query}"'
+
+        if field:
+            cql_terms = " OR ".join([f'{field} ~ "{term}"' for term in terms])
         else:
-            cql_terms = f'title ~ "{query}"'
-        params = {"cql": f'({cql_terms}) AND type="page"', "limit": limit}
-        rawResponse = self.get(endpoint, params)
-        response = []
-        for item in rawResponse["results"]:
-            response.append(item["id"])
-        return response
-
-    def search_by_content(self, query: str, limit: int = 5) -> List[str]:
-        """Search Confluence pages by content, returning page IDs"""
-        endpoint = "content/search"
-        # Split query into individual terms and join them with OR such that each word is optional
-        terms = query.split()
-        if terms:
-            cql_terms = " OR ".join([f'text ~ "{term}"' for term in terms])
-        else:
-            cql_terms = f'text ~ "{query}"'
-        params = {"cql": f'({cql_terms}) AND type="page"', "limit": limit}
-        rawResponse = self.get(endpoint, params)
-        response = []
-        for item in rawResponse["results"]:
-            response.append(item["id"])
-        return response
-
-    def search_by_title_and_content(self, query: str, limit: int = 5) -> List[str]:
-        """Search Confluence pages by both title and content, returning page IDs"""
-        endpoint = "content/search"
-        # Split query into words and join them with OR; each word is optional.
-        terms = query.split()
-        if terms:
             cql_terms = " OR ".join(
                 [f'title ~ "{term}" OR text ~ "{term}"' for term in terms]
             )
-        else:
-            cql_terms = f'title ~ "{query}" OR text ~ "{query}"'
+
+        return cql_terms
+
+    def search_confluence(
+        self, query: str, search_type: SearchType, limit: int = 5
+    ) -> List[str]:
+        """Unified search method using the search type enum"""
+        endpoint = "content/search"
+
+        if search_type == SearchType.TITLE:
+            cql_terms = self._build_search_query(query, "title")
+        elif search_type == SearchType.CONTENT:
+            cql_terms = self._build_search_query(query, "text")
+        else:  # TITLE_AND_CONTENT
+            cql_terms = self._build_search_query(query)
+
         params = {"cql": f'({cql_terms}) AND type="page"', "limit": limit}
-        rawResponse = self.get(endpoint, params)
-        response = []
-        for item in rawResponse["results"]:
-            response.append(item["id"])
-        return response
+        raw_response = self.get(endpoint, params)
+        return [item["id"] for item in raw_response.get("results", [])]
+
+    # Legacy methods maintained for backward compatibility
+    def search_by_title(self, query: str, limit: int = 5) -> List[str]:
+        """Search Confluence pages by title, returning page IDs"""
+        return self.search_confluence(query, SearchType.TITLE, limit)
+
+    def search_by_content(self, query: str, limit: int = 5) -> List[str]:
+        """Search Confluence pages by content, returning page IDs"""
+        return self.search_confluence(query, SearchType.CONTENT, limit)
+
+    def search_by_title_and_content(self, query: str, limit: int = 5) -> List[str]:
+        """Search Confluence pages by both title and content, returning page IDs"""
+        return self.search_confluence(query, SearchType.TITLE_AND_CONTENT, limit)
 
     def get_page(self, page_id: str) -> Dict[str, str]:
         """Get a specific Confluence page by ID"""
@@ -621,7 +677,6 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self.document_retriever = None
-        pass
 
     class Valves(BaseModel):
         """Configuration options for the Confluence search tool"""
@@ -742,81 +797,89 @@ class Tools:
         """
         event_emitter = EventEmitter(__event_emitter__)
 
-        # Get the username and API key
-        if __user__ and "valves" in __user__:
-            user_valves = __user__["valves"]
-            api_key_auth = user_valves.api_key_auth
-            api_username = user_valves.username or self.valves.username
-            api_key = user_valves.api_key or self.valves.api_key
-        else:
-            api_username = self.valves.username
-            api_key = self.valves.api_key
-            api_key_auth = True
-
-        if (api_key_auth and not api_username) or not api_key:
-            await event_emitter.emit_status(
-                "Please provide a username and API key or personal access token.",
-                True,
-                True,
-            )
-            return (
-                "Error: Please provide a username and API key or personal access token."
-            )
-
-        # Apply memory settings from valves
-        global MAX_PAGE_SIZE, BATCH_SIZE
-        MAX_PAGE_SIZE = self.valves.max_page_size
-        BATCH_SIZE = self.valves.batch_size
-
-        # Ensure cache directory exists
-        model_cache_dir = self.valves.embedding_model_save_path
-        if not model_cache_dir:
-            model_cache_dir = DEFAULT_MODEL_CACHE_DIR
-
         try:
-            os.makedirs(model_cache_dir, exist_ok=True)
-        except Exception as e:
-            await event_emitter.emit_status(
-                f"Error creating model cache directory: {str(e)}", True, True
-            )
-            return f"Error: {str(e)}"
+            # Convert the search type string to enum for better validation
+            search_type = SearchType.from_string(type)
 
-        # Initialize document retriever if not already done
-        if not self.document_retriever:
-            self.document_retriever = ConfluenceDocumentRetriever(
-                model_cache_dir=model_cache_dir,
-                device="cpu" if self.valves.cpu_only else "cuda",
-                embedding_model_name=self.valves.embedding_model_name,
-                batch_size=BATCH_SIZE,
-            )
-
-        # Load the embedding model if not already loaded
-        if not self.document_retriever.embedding_model:
-            await self.document_retriever.load_embedding_model(event_emitter)
-
-        confluence = Confluence(
-            api_username, api_key, self.valves.base_url, api_key_auth
-        )
-
-        search_type = type.lower()
-
-        await event_emitter.emit_status(
-            f"Searching Confluence for '{query}' in {search_type}...", False
-        )
-        try:
-            # Search using the Confluence API
-            if search_type == "title":
-                searchResponse = confluence.search_by_title(
-                    query, self.valves.api_result_limit
-                )
-            elif search_type == "content":
-                searchResponse = confluence.search_by_content(
-                    query, self.valves.api_result_limit
-                )
+            # Get the username and API key
+            if __user__ and "valves" in __user__:
+                user_valves = __user__["valves"]
+                api_key_auth = user_valves.api_key_auth
+                api_username = user_valves.username or self.valves.username
+                api_key = user_valves.api_key or self.valves.api_key
             else:
-                searchResponse = confluence.search_by_title_and_content(
-                    query, self.valves.api_result_limit
+                api_username = self.valves.username
+                api_key = self.valves.api_key
+                api_key_auth = True
+
+            if (api_key_auth and not api_username) or not api_key:
+                await event_emitter.emit_status(
+                    "Please provide a username and API key or personal access token.",
+                    True,
+                    True,
                 )
+                return "Error: Please provide a username and API key or personal access token."
+
+            # Apply memory settings from valves
+            global MAX_PAGE_SIZE, BATCH_SIZE
+            MAX_PAGE_SIZE = self.valves.max_page_size
+            BATCH_SIZE = self.valves.batch_size
+
+            # Ensure cache directory exists
+            model_cache_dir = (
+                self.valves.embedding_model_save_path or DEFAULT_MODEL_CACHE_DIR
+            )
+            try:
+                os.makedirs(model_cache_dir, exist_ok=True)
+            except Exception as e:
+                await event_emitter.emit_status(
+                    f"Error creating model cache directory: {str(e)}", True, True
+                )
+                return f"Error: {str(e)}"
+
+            # Initialize document retriever and load model with proper error handling
+            try:
+                if not self.document_retriever:
+                    self.document_retriever = ConfluenceDocumentRetriever(
+                        model_cache_dir=model_cache_dir,
+                        device="cpu" if self.valves.cpu_only else "cuda",
+                        embedding_model_name=self.valves.embedding_model_name,
+                        batch_size=BATCH_SIZE,
+                    )
+
+                if not self.document_retriever.embedding_model:
+                    await self.document_retriever.load_embedding_model(event_emitter)
+            except Exception as e:
+                await event_emitter.emit_status(
+                    f"Error loading embedding model: {str(e)}", True, True
+                )
+                return f"Error: Failed to load embedding model: {str(e)}"
+
+            # Create Confluence client with proper error handling
+            try:
+                confluence = Confluence(
+                    api_username, api_key, self.valves.base_url, api_key_auth
+                )
+            except ConfluenceAuthError as e:
+                await event_emitter.emit_status(
+                    f"Authentication error: {str(e)}", True, True
+                )
+                return f"Error: Authentication failed: {str(e)}"
+
+            await event_emitter.emit_status(
+                f"Searching Confluence for '{query}' in {search_type.value}...", False
+            )
+
+            # Search using the Confluence API
+            try:
+                searchResponse = confluence.search_confluence(
+                    query, search_type, self.valves.api_result_limit
+                )
+            except ConfluenceAPIError as e:
+                await event_emitter.emit_status(
+                    f"API error during search: {str(e)}", True, True
+                )
+                return f"Error: Confluence API error: {str(e)}"
 
             if not searchResponse:
                 await event_emitter.emit_status(
@@ -946,6 +1009,6 @@ class Tools:
             return json.dumps(results)
         except Exception as e:
             await event_emitter.emit_status(
-                f"Failed to search for {search_type} '{query}': {e}.", True, True
+                f"Unexpected error during search: {str(e)}.", True, True
             )
             return f"Error: {str(e)}"
