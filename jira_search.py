@@ -11,6 +11,7 @@ changelog:
 - 0.0.2 - Implement Jira search
 - 0.1.0 - Add support for Personal Access Token authentication and user settings
 - 0.1.1 - Limit setting for search results
+- 0.1.2 - Add terms splitting option
 """
 
 
@@ -65,11 +66,15 @@ class Jira:
         response = requests.get(url, params=params, headers=self.headers)
         return response.json()
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    def search(self, query: str, limit: int = 5, split_terms: bool = True) -> Dict[str, Any]:
         endpoint = "search"
-        terms = query.split()
-        if terms:
-            cql_terms = " OR ".join([f'text ~ "{term}"' for term in terms])
+        if split_terms:
+            terms = [term.strip() for term in query.split() if term.strip()]
+            if terms:
+                cql_terms = " OR ".join([f'text ~ "{term}"' for term in terms])
+            else:
+                # Handle the case with no meaningful terms
+                cql_terms = f'text ~ "{query}"'
         else:
             cql_terms = f'text ~ "{query}"'
         params = {"jql": f"{cql_terms}", "maxResults": limit}
@@ -130,6 +135,10 @@ class Tools:
         api_key: str = Field(
             "",
             description="API key or personal access token; leave empty to use the default settings.",
+        )
+        split_query: bool = Field(
+            True,
+            description="Split the query into individual words and search for each word separately.",
         )
         pass
 
