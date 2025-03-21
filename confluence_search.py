@@ -19,6 +19,7 @@ changelog:
 - 0.2.1 - Use Open WebUI environment variables
 - 0.2.2 - Fix confusion between Confluence API limit and RAG parameters
 - 0.2.3 - Memory optimization to prevent OOM errors
+- 0.2.4 - Move all hard-coded values to constants
 """
 
 import base64
@@ -45,7 +46,6 @@ RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE = (
 DEFAULT_CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "1000"))
 DEFAULT_CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "100"))
 DEFAULT_TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
-DEFAULT_API_RESULT_LIMIT = 5  # Default number of results to return from Confluence API
 DEFAULT_RELEVANCE_THRESHOLD = float(os.environ.get("RAG_RELEVANCE_THRESHOLD", "0.0"))
 ENABLE_HYBRID_SEARCH = os.environ.get("ENABLE_RAG_HYBRID_SEARCH", "").lower() == "true"
 RAG_FULL_CONTEXT = os.environ.get("RAG_FULL_CONTEXT", "False").lower() == "true"
@@ -57,6 +57,31 @@ BATCH_SIZE = int(os.environ.get("RAG_FILE_MAX_COUNT", "16"))
 # Read cache dir from environment
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cache")
 DEFAULT_MODEL_CACHE_DIR = os.path.join(CACHE_DIR, "sentence_transformers")
+
+# Additional constant values
+DEFAULT_RRF_CONSTANT = 60
+DEFAULT_DUPLICATE_THRESHOLD = 0.95
+DEFAULT_BM25_K = 4
+DEFAULT_SIMILARITY_FALLBACK = 0.0
+
+# Field validation constraints
+CHUNK_SIZE_MIN = 5
+CHUNK_SIZE_MAX = 100000
+CHUNK_OVERLAP_MIN = 0
+CHUNK_OVERLAP_MAX = 1000
+MAX_RESULTS_MIN = 1
+SIMILARITY_SCORE_MIN = 0.0
+SIMILARITY_SCORE_MAX = 1.0
+MAX_PAGE_SIZE_MIN = 1000
+MAX_PAGE_SIZE_MAX = 1000000
+BATCH_SIZE_MIN = 1
+BATCH_SIZE_MAX = 100
+
+# Default Confluence API related constants
+DEFAULT_BASE_URL = "https://example.atlassian.net/wiki"
+DEFAULT_USERNAME = "example@example.com"
+DEFAULT_API_KEY = "ABCD1234"
+DEFAULT_API_RESULT_LIMIT = 5
 
 
 @dataclass
@@ -196,7 +221,7 @@ def cosine_similarity(X, Y) -> np.ndarray:
     # Ignore divide by zero errors run time warnings as those are handled below.
     with np.errstate(divide="ignore", invalid="ignore"):
         similarity = np.dot(X, Y.T) / np.outer(X_norm, Y_norm)
-    similarity[np.isnan(similarity) | np.isinf(similarity)] = 0.0
+    similarity[np.isnan(similarity) | np.isinf(similarity)] = DEFAULT_SIMILARITY_FALLBACK
     return similarity
 
 
@@ -274,7 +299,7 @@ class DenseRetriever:
 
         # Remove duplicative content
         included_idxs = filter_similar_embeddings(
-            relevant_doc_embeddings, cosine_similarity, threshold=0.95
+            relevant_doc_embeddings, cosine_similarity, threshold=DEFAULT_DUPLICATE_THRESHOLD
         )
         relevant_doc_embeddings = relevant_doc_embeddings[included_idxs]
 
@@ -300,7 +325,7 @@ class BM25Retriever:
         self,
         vectorizer: Any,
         docs: List[Document],
-        k: int = 4,
+        k: int = DEFAULT_BM25_K,
         preprocess_func: Callable[[str], List[str]] = default_preprocessing_func,
     ):
         self.vectorizer = vectorizer
@@ -338,7 +363,7 @@ class BM25Retriever:
 
 
 def weighted_reciprocal_rank(
-    doc_lists: List[List[Document]], weights: List[float], c: int = 60
+    doc_lists: List[List[Document]], weights: List[float], c: int = DEFAULT_RRF_CONSTANT
 ) -> List[Document]:
     """Combine multiple ranked document lists into a single ranking"""
     if len(doc_lists) != len(weights):
@@ -602,15 +627,15 @@ class Tools:
         """Configuration options for the Confluence search tool"""
 
         base_url: str = Field(
-            "https://example.atlassian.net/wiki",
+            DEFAULT_BASE_URL,
             description="The base URL of your Confluence instance",
         )
         username: str = Field(
-            "example@example.com",
+            DEFAULT_USERNAME,
             description="Default username (leave empty for personal access token)",
         )
         api_key: str = Field(
-            "ABCD1234", description="Default API key or personal access token"
+            DEFAULT_API_KEY, description="Default API key or personal access token"
         )
         api_result_limit: int = Field(
             DEFAULT_API_RESULT_LIMIT,
@@ -629,35 +654,35 @@ class Tools:
         chunk_size: int = Field(
             default=DEFAULT_CHUNK_SIZE,
             description="Max. chunk size for Confluence pages",
-            ge=5,
-            le=100000,
+            ge=CHUNK_SIZE_MIN,
+            le=CHUNK_SIZE_MAX,
         )
         chunk_overlap: int = Field(
             default=DEFAULT_CHUNK_OVERLAP,
             description="Overlap size between chunks",
-            ge=0,
-            le=1000,
+            ge=CHUNK_OVERLAP_MIN,
+            le=CHUNK_OVERLAP_MAX,
         )
         max_results: int = Field(
             default=DEFAULT_TOP_K,
             description="Maximum number of relevant chunks to return after RAG processing",
-            ge=1,
+            ge=MAX_RESULTS_MIN,
         )
         similarity_threshold: float = Field(
             default=DEFAULT_RELEVANCE_THRESHOLD,
             description="Similarity Score Threshold. "
             "Discard chunks that are not similar enough to the "
             "search query and hence fall below the threshold.",
-            ge=0.0,
-            le=1.0,
+            ge=SIMILARITY_SCORE_MIN,
+            le=SIMILARITY_SCORE_MAX,
         )
         ensemble_weighting: float = Field(
             default=0.5,
             description="Ensemble Weighting. "
             "Smaller values = More keyword oriented, Larger values = More focus on semantic similarity. "
             "Ignored if hybrid search is disabled.",
-            ge=0.0,
-            le=1.0,
+            ge=SIMILARITY_SCORE_MIN,
+            le=SIMILARITY_SCORE_MAX,
         )
         enable_hybrid_search: bool = Field(
             default=ENABLE_HYBRID_SEARCH,
@@ -670,14 +695,14 @@ class Tools:
         max_page_size: int = Field(
             default=MAX_PAGE_SIZE,
             description="Maximum size in characters for a Confluence page to prevent OOM",
-            ge=1000,
-            le=1000000,
+            ge=MAX_PAGE_SIZE_MIN,
+            le=MAX_PAGE_SIZE_MAX,
         )
         batch_size: int = Field(
             default=BATCH_SIZE,
             description="Number of documents to process at once for embedding",
-            ge=1,
-            le=100,
+            ge=BATCH_SIZE_MIN,
+            le=BATCH_SIZE_MAX,
         )
         pass
 
