@@ -5,8 +5,8 @@ repository: https://github.com/RomainNeup/open-webui-utilities
 author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
-requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn
-version: 0.2.2
+requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn, psutil
+version: 0.2.3
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
@@ -18,13 +18,13 @@ changelog:
 - 0.2.0 - Implement RAG (Retrieval Augmented Generation) approach for better search results
 - 0.2.1 - Use Open WebUI environment variables
 - 0.2.2 - Fix confusion between Confluence API limit and RAG parameters
+- 0.2.3 - Memory optimization to prevent OOM errors
 """
 
 import base64
 import json
 import requests
 import asyncio
-import copy
 import numpy as np
 import os
 from typing import Awaitable, Callable, Dict, List, Any, Optional, Iterable
@@ -49,6 +49,10 @@ DEFAULT_API_RESULT_LIMIT = 5  # Default number of results to return from Conflue
 DEFAULT_RELEVANCE_THRESHOLD = float(os.environ.get("RAG_RELEVANCE_THRESHOLD", "0.0"))
 ENABLE_HYBRID_SEARCH = os.environ.get("ENABLE_RAG_HYBRID_SEARCH", "").lower() == "true"
 RAG_FULL_CONTEXT = os.environ.get("RAG_FULL_CONTEXT", "False").lower() == "true"
+
+# Memory management settings
+MAX_PAGE_SIZE = int(os.environ.get("RAG_FILE_MAX_SIZE", "10000"))
+BATCH_SIZE = int(os.environ.get("RAG_FILE_MAX_COUNT", "16"))
 
 # Read cache dir from environment
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cache")
@@ -114,31 +118,61 @@ class TextSplitter:
         if not text:
             return []
 
+        # Check for extremely large text and enforce hard limit
+        text_length = len(text)
+        if text_length > MAX_PAGE_SIZE:
+            text_length = MAX_PAGE_SIZE
+            text = text[:MAX_PAGE_SIZE]  # Truncate text to hard limit
+
         chunks = []
         start = 0
-        text_len = len(text)
 
-        while start < text_len:
-            end = min(start + self.chunk_size, text_len)
-            # Find a good breaking point at sentence boundaries
-            if end < text_len:
-                for i in range(end, max(start + self.chunk_overlap, end - 50), -1):
-                    if i < text_len and text[i] in [".", "!", "?", "\n"]:
-                        end = i + 1
+        # Process text in smaller windows to reduce memory pressure
+        while start < text_length:
+            # Calculate window end with extra margin for finding good break points
+            window_end = min(start + self.chunk_size + 100, text_length)
+            window = text[start:window_end]
+
+            # Find actual chunk end with good break point
+            chunk_end = min(self.chunk_size, len(window))
+            if chunk_end < len(window):
+                # Look for good break points
+                search_start = max(self.chunk_overlap, chunk_end - 50)
+                for i in range(chunk_end, search_start, -1):
+                    if i < len(window) and window[i - 1 : i] in [".", "!", "?", "\n"]:
+                        chunk_end = i
                         break
 
-            chunks.append(text[start:end])
-            start = end - self.chunk_overlap
+            # Extract chunk from window
+            chunk = window[:chunk_end]
+            chunks.append(chunk)
+
+            # Update start position for next window
+            # Ensure we always make progress by advancing at least 1 character
+            # This prevents infinite loops when chunk_end ≤ chunk_overlap
+            progress = max(1, chunk_end - self.chunk_overlap)
+            start += progress
+
+            # Explicitly clean up the window variable
+            window = None
 
         return chunks
 
-    def split_documents(self, documents: List[Document]) -> List[Document]:
+    async def split_documents(
+        self, documents: List[Document], event_emitter: EventEmitter
+    ) -> List[Document]:
         """Split documents into chunks while preserving metadata"""
         chunked_documents = []
+        done = 0
         for doc in documents:
+            await event_emitter.emit_status(
+                f"Breaking down document {done+1}/{len(documents)} for better analysis",
+                False,
+            )
+            done += 1
             chunks = self.split_text(doc.page_content)
+            metadata = dict(doc.metadata)
             for chunk in chunks:
-                metadata = copy.deepcopy(doc.metadata)
                 chunked_documents.append(
                     Document(page_content=chunk, metadata=metadata)
                 )
@@ -190,30 +224,54 @@ class DenseRetriever:
         embedding_model: SentenceTransformer,
         num_results: int = DEFAULT_TOP_K,
         similarity_threshold: float = DEFAULT_RELEVANCE_THRESHOLD,
+        batch_size: int = BATCH_SIZE,
     ):
         self.embedding_model = embedding_model
         self.num_results = num_results
         self.similarity_threshold = similarity_threshold
-        self.knn = NearestNeighbors(n_neighbors=num_results)
+        self.batch_size = batch_size
+        self.knn = None
         self.documents = None
         self.document_embeddings = None
 
     def add_documents(self, documents: List[Document]):
         """Process documents and prepare embeddings for search"""
         self.documents = documents
-        self.document_embeddings = self.embedding_model.encode(
-            [doc.page_content for doc in documents]
+
+        # Process documents in batches to avoid memory issues
+        all_embeddings = []
+        for i in range(0, len(documents), self.batch_size):
+            batch = documents[i : i + self.batch_size]
+            batch_texts = [doc.page_content for doc in batch]
+            batch_embeddings = self.embedding_model.encode(batch_texts)
+            all_embeddings.append(batch_embeddings)
+
+        # Concatenate all batches
+        self.document_embeddings = (
+            np.vstack(all_embeddings) if all_embeddings else np.array([])
         )
-        self.knn.fit(self.document_embeddings)
+
+        # Create KNN index
+        self.knn = NearestNeighbors(n_neighbors=min(self.num_results, len(documents)))
+        if len(self.document_embeddings) > 0:
+            self.knn.fit(self.document_embeddings)
 
     def get_relevant_documents(self, query: str) -> List[Document]:
         """Find documents most relevant to the query using semantic similarity"""
+        if not self.knn or not self.documents:
+            return []
+
         query_embedding = self.embedding_model.encode(query)
 
         _, neighbor_indices = self.knn.kneighbors(query_embedding.reshape(1, -1))
         neighbor_indices = neighbor_indices.squeeze(0)
 
+        # Handle case where we have fewer documents than k
+        if len(neighbor_indices) == 0:
+            return []
+
         relevant_doc_embeddings = self.document_embeddings[neighbor_indices]
+
         # Remove duplicative content
         included_idxs = filter_similar_embeddings(
             relevant_doc_embeddings, cosine_similarity, threshold=0.95
@@ -226,6 +284,7 @@ class DenseRetriever:
         included_idxs = [included_idxs[i] for i in similar_enough]
 
         filtered_result_indices = neighbor_indices[included_idxs]
+
         return [self.documents[i] for i in filtered_result_indices]
 
 
@@ -319,11 +378,13 @@ class ConfluenceDocumentRetriever:
         model_cache_dir: str = DEFAULT_MODEL_CACHE_DIR,
         device: str = "cpu",
         embedding_model_name: str = DEFAULT_EMBEDDING_MODEL,
+        batch_size: int = BATCH_SIZE,
     ):
         self.device = device
         self.model_cache_dir = model_cache_dir
         self.embedding_model = None
         self.embedding_model_name = embedding_model_name
+        self.batch_size = batch_size
         self.text_splitter = TextSplitter(
             chunk_size=DEFAULT_CHUNK_SIZE, chunk_overlap=DEFAULT_CHUNK_OVERLAP
         )
@@ -347,14 +408,11 @@ class ConfluenceDocumentRetriever:
 
         return self.embedding_model
 
-    def chunk_documents(self, documents: List[Document]) -> List[Document]:
-        """Divide documents into smaller chunks for better processing"""
-        return self.text_splitter.split_documents(documents)
-
-    def retrieve_from_confluence_pages(
+    async def retrieve_from_confluence_pages(
         self,
         query: str,
         documents: List[Document],
+        event_emitter,
         num_results: int = DEFAULT_TOP_K,
         similarity_threshold: float = DEFAULT_RELEVANCE_THRESHOLD,
         ensemble_weighting: float = 0.5,
@@ -364,7 +422,14 @@ class ConfluenceDocumentRetriever:
         if not documents:
             return []
 
-        chunked_docs = self.chunk_documents(documents)
+        # Chunk documents
+        chunked_docs = await self.text_splitter.split_documents(
+            documents, event_emitter
+        )
+        await event_emitter.emit_status(
+            f"Prepared {len(chunked_docs)} content sections from {len(documents)} pages for analysis",
+            False,
+        )
 
         if not chunked_docs:
             return []
@@ -377,22 +442,36 @@ class ConfluenceDocumentRetriever:
 
         # Semantic search with embeddings
         if ensemble_weighting > 0:
+            await event_emitter.emit_status(
+                f"Analyzing content meaning in batches of {self.batch_size}...", False
+            )
             dense_retriever = DenseRetriever(
                 self.embedding_model,
                 num_results=num_results,
                 similarity_threshold=similarity_threshold,
+                batch_size=self.batch_size,
             )
             dense_retriever.add_documents(chunked_docs)
             dense_results = dense_retriever.get_relevant_documents(query)
+            await event_emitter.emit_status(
+                f"Located {len(dense_results)} sections that match your query's meaning",
+                False,
+            )
         else:
             dense_results = []
 
         # Keyword search with BM25
         if ensemble_weighting < 1:
+            await event_emitter.emit_status(
+                "Looking for matching keywords in content...", False
+            )
             keyword_retriever = BM25Retriever.from_documents(
                 chunked_docs, k=num_results
             )
             sparse_results = keyword_retriever.get_relevant_documents(query)
+            await event_emitter.emit_status(
+                f"Found {len(sparse_results)} sections with matching keywords", False
+            )
         else:
             sparse_results = []
 
@@ -478,10 +557,16 @@ class Confluence:
         endpoint = f"content/{page_id}"
         params = {"expand": "body.view", "include-version": "false"}
         result = self.get(endpoint, params)
+
+        # Get page content and limit size if needed
+        body = markdownify(result["body"]["view"]["value"])
+        if len(body) > MAX_PAGE_SIZE:
+            body = body[:MAX_PAGE_SIZE]
+
         return {
             "id": result["id"],
             "title": result["title"],
-            "body": markdownify(result["body"]["view"]["value"]),
+            "body": body,
             "link": f'{self.base_url}{result["_links"]["webui"]}',
         }
 
@@ -582,6 +667,18 @@ class Tools:
             default=RAG_FULL_CONTEXT,
             description="Return full document content instead of just the most relevant chunks",
         )
+        max_page_size: int = Field(
+            default=MAX_PAGE_SIZE,
+            description="Maximum size in characters for a Confluence page to prevent OOM",
+            ge=1000,
+            le=1000000,
+        )
+        batch_size: int = Field(
+            default=BATCH_SIZE,
+            description="Number of documents to process at once for embedding",
+            ge=1,
+            le=100,
+        )
         pass
 
     class UserValves(BaseModel):
@@ -641,18 +738,23 @@ class Tools:
                 "Error: Please provide a username and API key or personal access token."
             )
 
-        # Check if embedding model path is set
+        # Apply memory settings from valves
+        global MAX_PAGE_SIZE, BATCH_SIZE
+        MAX_PAGE_SIZE = self.valves.max_page_size
+        BATCH_SIZE = self.valves.batch_size
+
+        # Ensure cache directory exists
         model_cache_dir = self.valves.embedding_model_save_path
         if not model_cache_dir:
             model_cache_dir = DEFAULT_MODEL_CACHE_DIR
-            # Try to create the directory if it doesn't exist
-            try:
-                os.makedirs(model_cache_dir, exist_ok=True)
-            except Exception as e:
-                await event_emitter.emit_status(
-                    f"Error creating model cache directory: {str(e)}", True, True
-                )
-                return f"Error: {str(e)}"
+
+        try:
+            os.makedirs(model_cache_dir, exist_ok=True)
+        except Exception as e:
+            await event_emitter.emit_status(
+                f"Error creating model cache directory: {str(e)}", True, True
+            )
+            return f"Error: {str(e)}"
 
         # Initialize document retriever if not already done
         if not self.document_retriever:
@@ -660,6 +762,7 @@ class Tools:
                 model_cache_dir=model_cache_dir,
                 device="cpu" if self.valves.cpu_only else "cuda",
                 embedding_model_name=self.valves.embedding_model_name,
+                batch_size=BATCH_SIZE,
             )
 
         # Load the embedding model if not already loaded
@@ -673,7 +776,7 @@ class Tools:
         search_type = type.lower()
 
         await event_emitter.emit_status(
-            f"Searching for {search_type} '{query}' on Confluence...", False
+            f"Searching Confluence for '{query}' in {search_type}...", False
         )
         try:
             # Search using the Confluence API
@@ -690,9 +793,18 @@ class Tools:
                     query, self.valves.api_result_limit
                 )
 
+            if not searchResponse:
+                await event_emitter.emit_status(
+                    f"No matching results found in Confluence for '{query}'", True
+                )
+                return json.dumps([])
+
             # Fetch the full content of each page found
             raw_documents = []
-            for item in searchResponse:
+            for i, item in enumerate(searchResponse):
+                await event_emitter.emit_status(
+                    f"Retrieving Confluence page {i+1}/{len(searchResponse)}...", False
+                )
                 page = confluence.get_page(item)
                 raw_documents.append(
                     Document(
@@ -708,7 +820,7 @@ class Tools:
             # If full context mode is enabled, skip RAG processing and return complete pages
             if self.valves.full_context:
                 await event_emitter.emit_status(
-                    f"Returning {len(raw_documents)} full Confluence pages (RAG disabled)...",
+                    f"Preparing all {len(raw_documents)} Confluence pages for you...",
                     False,
                 )
 
@@ -730,7 +842,7 @@ class Tools:
                     results.append(result)
 
                 await event_emitter.emit_status(
-                    f"Search for {search_type} '{query}' on Confluence complete. ({len(results)} full pages found)",
+                    f"Found {len(results)} complete Confluence pages matching '{query}'",
                     True,
                 )
 
@@ -739,7 +851,7 @@ class Tools:
             # Apply RAG processing to find the most relevant content
             elif raw_documents:
                 await event_emitter.emit_status(
-                    f"Processing {len(raw_documents)} Confluence pages with chunk size {self.valves.chunk_size}...",
+                    f"Analyzing {len(raw_documents)} pages to find the most relevant content...",
                     False,
                 )
 
@@ -752,15 +864,19 @@ class Tools:
                 )
 
                 relevant_chunks = (
-                    self.document_retriever.retrieve_from_confluence_pages(
+                    await self.document_retriever.retrieve_from_confluence_pages(
                         query=query,
                         documents=raw_documents,
+                        event_emitter=event_emitter,
                         num_results=self.valves.max_results,
                         similarity_threshold=self.valves.similarity_threshold,
                         ensemble_weighting=self.valves.ensemble_weighting,
                         enable_hybrid_search=self.valves.enable_hybrid_search,
                     )
                 )
+
+                # Clear raw documents to free memory
+                raw_documents = None
 
                 # Group chunks by page to build results
                 page_chunks = {}
@@ -798,7 +914,7 @@ class Tools:
                 results = []
 
             await event_emitter.emit_status(
-                f"Search for {search_type} '{query}' on Confluence complete. ({len(results)} pages with relevant content found)",
+                f"Search complete! Found {len(results)} pages with information about '{query}'",
                 True,
             )
 
