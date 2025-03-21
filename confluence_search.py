@@ -5,7 +5,7 @@ repository: https://github.com/RomainNeup/open-webui-utilities
 author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
-requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn, psutil
+requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn
 version: 0.2.5
 changelog:
 - 0.0.1 - Initial code base.
