@@ -10,7 +10,7 @@ version: 0.2.5
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
-- 0.1.0 - Split Confuence search and Confluence get page
+- 0.1.0 - Split Confluence search and Confluence get page
 - 0.1.1 - Split Confluence search by title and by content
 - 0.1.2 - Improve search by splitting query into words
 - 0.1.3 - Add support for Personal Access Token authentication and user settings
