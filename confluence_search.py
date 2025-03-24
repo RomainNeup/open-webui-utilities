@@ -563,16 +563,17 @@ class Confluence:
     """Interface for Confluence API operations"""
 
     def __init__(
-        self, username: str, api_key: str, base_url: str, api_key_auth: bool = True
+        self, username: str, api_key: str, base_url: str, api_key_auth: bool = True, ssl_verify: bool = True
     ):
         self.base_url = base_url
+        self.ssl_verify = ssl_verify
         self.headers = self.authenticate(username, api_key, api_key_auth)
 
     def get(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Make a GET request to the Confluence API"""
         url = f"{self.base_url}/rest/api/{endpoint}"
         try:
-            response = requests.get(url, params=params, headers=self.headers)
+            response = requests.get(url, params=params, headers=self.headers, verify=self.ssl_verify)
             if response.status_code == 401:
                 raise ConfluenceAuthError(
                     "Authentication failed. Check your credentials."
@@ -678,6 +679,10 @@ class Tools:
         base_url: str = Field(
             DEFAULT_BASE_URL,
             description="The base URL of your Confluence instance",
+        )
+        ssl_verify: bool = Field(
+            True, 
+            description="SSL verification"
         )
         username: str = Field(
             DEFAULT_USERNAME,
@@ -858,7 +863,7 @@ class Tools:
             # Create Confluence client with proper error handling
             try:
                 confluence = Confluence(
-                    api_username, api_key, self.valves.base_url, api_key_auth
+                    api_username, api_key, self.valves.base_url, api_key_auth, self.valves.ssl_verify
                 )
             except ConfluenceAuthError as e:
                 await event_emitter.emit_status(
