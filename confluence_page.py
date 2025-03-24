@@ -6,12 +6,13 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify
-version: 0.1.1
+version: 0.2.0
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
 - 0.1.0 - Split Confuence search and Confluence get page
 - 0.1.1 - Add support for Personal Access Token authentication and user settings
+- 0.2.0 - Add setting for SSL verification
 """
 
 import base64
@@ -57,15 +58,16 @@ class EventEmitter:
 
 class Confluence:
     def __init__(
-        self, username: str, api_key: str, base_url: str, api_key_auth: bool = True
+        self, username: str, api_key: str, base_url: str, api_key_auth: bool = True, ssl_verify: bool = True
     ):
         self.base_url = base_url
         self.headers = self.authenticate(username, api_key, api_key_auth)
+        self.ssl_verify = ssl_verify
         pass
 
     def get(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.base_url}/rest/api/{endpoint}"
-        response = requests.get(url, params=params, headers=self.headers)
+        response = requests.get(url, params=params, headers=self.headers, verify=self.ssl_verify)
         if not response.ok:
             raise Exception(f"Failed to get data from Confluence: {response.text}")
         return response.json()
@@ -114,6 +116,10 @@ class Tools:
         )
         api_key: str = Field(
             "ABCD1234", description="Default API key or personal access token"
+        )
+        ssl_verify: bool = Field(
+            True, 
+            description="SSL verification"
         )
         pass
 
@@ -165,7 +171,7 @@ class Tools:
             return "Error: Please provide a username and API key or personal access token."
         
         confluence = Confluence(
-            api_username, api_key, self.valves.base_url, api_key_auth
+            api_username, api_key, self.valves.base_url, api_key_auth, self.valves.ssl_verify
         )
         
         await event_emitter.emit_status(f"Retrieving page '{page_id}' from Confluence...", False)

@@ -5,13 +5,14 @@ repository: https://github.com/RomainNeup/open-webui-utilities
 author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
-version: 0.1.0
+version: 0.2.0
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Implement Jira search
 - 0.1.0 - Add support for Personal Access Token authentication and user settings
 - 0.1.1 - Limit setting for search results
 - 0.1.2 - Add terms splitting option
+- 0.2.0 - Add setting for SSL verification
 """
 
 
@@ -56,14 +57,15 @@ class EventEmitter:
 
 
 class Jira:
-    def __init__(self, username: str, api_key: str, base_url: str, api_key_auth: bool = True):
+    def __init__(self, username: str, api_key: str, base_url: str, api_key_auth: bool = True, ssl_verify: bool = True):
         self.base_url = base_url
         self.headers = self.authenticate(username, api_key, api_key_auth)
+        self.ssl_verify = ssl_verify
         pass
 
     def get(self, endpoint: str, params: Dict[str, Any]):
         url = f"{self.base_url}/rest/api/3/{endpoint}"
-        response = requests.get(url, params=params, headers=self.headers)
+        response = requests.get(url, params=params, headers=self.headers, verify=self.ssl_verify)
         return response.json()
 
     def search(self, query: str, limit: int = 5, split_terms: bool = True) -> Dict[str, Any]:
@@ -118,6 +120,10 @@ class Tools:
         api_key: str = Field(
             "ABCD1234", description="Default API key or personal access token"
         )
+        ssl_verify: bool = Field(
+            True, 
+            description="SSL verification"
+        )
         result_limit: int = Field(
             5, description="The maximum number of search results to return", required=True
         )
@@ -168,7 +174,7 @@ class Tools:
             api_key = self.valves.api_key
             api_key_auth = True
 
-        jira = Jira(api_username, api_key, self.valves.base_url, api_key_auth)
+        jira = Jira(api_username, api_key, self.valves.base_url, api_key_auth, self.valves.ssl_verify)
 
         await event_emitter.emit_status(
             f"Searching for '{query}' on Jira...", False
