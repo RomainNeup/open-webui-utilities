@@ -33,6 +33,7 @@ This tool searches for Confluence pages using a given query string.
     - Username: example@mail.com
     - API Key: 1234ABCD
     - Base URL: https://example.atlassian.net/wiki
+    - Ssl Verify: Default to true, disable if you have a self signed cert.
     - Result Limit: 5
 - User Settings:
     - api_key_auth: Use API key authentication (true) or personal access token (false)
