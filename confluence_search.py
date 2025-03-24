@@ -22,6 +22,7 @@ changelog:
 - 0.2.4 - Move all hard-coded values to constants
 - 0.2.5 - Code structure improvements: search type enum, and better error handling
 - 0.2.6 - Add terms splitting option
+- 0.3.0 - Add settings for ssl verification
 """
 
 import base64
