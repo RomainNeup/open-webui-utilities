@@ -564,7 +564,12 @@ class Confluence:
     """Interface for Confluence API operations"""
 
     def __init__(
-        self, username: str, api_key: str, base_url: str, api_key_auth: bool = True, ssl_verify: bool = True
+        self,
+        username: str,
+        api_key: str,
+        base_url: str,
+        api_key_auth: bool = True,
+        ssl_verify: bool = True,
     ):
         self.base_url = base_url
         self.ssl_verify = ssl_verify
@@ -574,7 +579,9 @@ class Confluence:
         """Make a GET request to the Confluence API"""
         url = f"{self.base_url}/rest/api/{endpoint}"
         try:
-            response = requests.get(url, params=params, headers=self.headers, verify=self.ssl_verify)
+            response = requests.get(
+                url, params=params, headers=self.headers, verify=self.ssl_verify
+            )
             if response.status_code == 401:
                 raise ConfluenceAuthError(
                     "Authentication failed. Check your credentials."
@@ -598,14 +605,12 @@ class Confluence:
             if field:
                 return f'{field} ~ "{query}"'
             return f'text ~ "{query}" OR title ~ "{query}"'
-
         if field:
             cql_terms = " OR ".join([f'{field} ~ "{term}"' for term in terms])
         else:
             cql_terms = " OR ".join(
                 [f'title ~ "{term}" OR text ~ "{term}"' for term in terms]
             )
-
         return cql_terms
 
     def search_confluence(
@@ -614,10 +619,10 @@ class Confluence:
         search_type: SearchType,
         limit: int = 5,
         split_terms: bool = True,
+        space: str = "CTSW",  # Add space parameter, replace CTSW with whatever your space ID is
     ) -> List[str]:
         """Unified search method using the search type enum"""
         endpoint = "content/search"
-
         if search_type == SearchType.TITLE:
             cql_terms = self._build_search_query(query, "title", split_terms)
         elif search_type == SearchType.CONTENT:
@@ -625,7 +630,11 @@ class Confluence:
         else:  # TITLE_AND_CONTENT
             cql_terms = self._build_search_query(query, split_terms=split_terms)
 
-        params = {"cql": f'({cql_terms}) AND type="page"', "limit": limit}
+        # Modify the CQL query to include space constraint
+        params = {
+            "cql": f'({cql_terms}) AND type="page" AND space="{space}"',
+            "limit": limit,
+        }
         raw_response = self.get(endpoint, params)
         return [item["id"] for item in raw_response.get("results", [])]
 
@@ -634,12 +643,10 @@ class Confluence:
         endpoint = f"content/{page_id}"
         params = {"expand": "body.view", "include-version": "false"}
         result = self.get(endpoint, params)
-
         # Get page content and limit size if needed
         body = markdownify(result["body"]["view"]["value"])
         if len(body) > MAX_PAGE_SIZE:
             body = body[:MAX_PAGE_SIZE]
-
         return {
             "id": result["id"],
             "title": result["title"],
