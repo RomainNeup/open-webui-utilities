@@ -616,11 +616,12 @@ class Confluence:
             )
         
         if self.included_spaces is not None and len(self.included_spaces) > 0:
-            cql_terms += f' AND space in ({", ".join(self.included_spaces)})'
+            quoted_spaces = [f"'{space}'" for space in self.included_spaces]
+            cql_terms += f' AND space in ({", ".join(quoted_spaces)})'
 
         if self.excluded_spaces is not None and len(self.excluded_spaces) > 0:
-            cql_terms += f' AND space not in ({", ".join(self.excluded_spaces)})'
-
+            quoted_excluded_spaces = [f"'{space}'" for space in self.excluded_spaces]
+            cql_terms += f' AND space not in ({", ".join(quoted_excluded_spaces)})'
         return cql_terms
 
     def search_confluence(
