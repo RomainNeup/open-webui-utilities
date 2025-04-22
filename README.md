@@ -53,6 +53,8 @@ This tool searches for Confluence pages using a given query string with RAG (Ret
     - username: Override default username for authentication
     - api_key: Override default API key or personal access token
     - split_terms: Split search query into words for better search results
+    - included_confluence_spaces: Comma-separated list of Confluence spaces to search in (leave empty for all). Be aware that it can conflict with the excluded_confluence_spaces setting.
+    - excluded_confluence_spaces: Comma-separated list of Confluence spaces to exclude from search (leave empty for none). Be aware that it can conflict with the included_confluence_spaces setting.
 - Usage: Run the script and provide the search query as an argument. The tool will return the most relevant Confluence pages and content sections.
 
 ### jira_issue.py
