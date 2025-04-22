@@ -615,10 +615,10 @@ class Confluence:
                 [f'title ~ "{term}" OR text ~ "{term}"' for term in terms]
             )
         
-        if self.included_spaces is not None:
+        if self.included_spaces is not None and len(self.included_spaces) > 0:
             cql_terms += f' AND space in ({", ".join(self.included_spaces)})'
 
-        if self.excluded_spaces is not None:
+        if self.excluded_spaces is not None and len(self.excluded_spaces) > 0:
             cql_terms += f' AND space not in ({", ".join(self.excluded_spaces)})'
 
         return cql_terms
