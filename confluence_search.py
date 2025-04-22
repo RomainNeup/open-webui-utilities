@@ -6,7 +6,7 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn
-version: 0.2.5
+version: 0.4.0
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
@@ -23,6 +23,7 @@ changelog:
 - 0.2.5 - Code structure improvements: search type enum, and better error handling
 - 0.2.6 - Add terms splitting option
 - 0.3.0 - Add settings for ssl verification
+- 0.4.0 - Add support for included/exluded confluence spaces in user settings
 """
 
 import base64
