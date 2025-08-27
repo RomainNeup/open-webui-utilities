@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from sklearn.neighbors import NearestNeighbors
+import logging
 
 # Get environment variables
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
@@ -512,34 +513,54 @@ class Jira:
         self.base_url = base_url
         self.headers = self.authenticate(username, api_key, api_key_auth)
         self.ssl_verify = ssl_verify
+        self.logger = logging.getLogger("jira_search")
         pass
 
     def get(self, endpoint: str, params: Dict[str, Any]):
         url = f"{self.base_url}/rest/api/3/{endpoint}"
-        response = requests.get(
-            url, params=params, headers=self.headers, verify=self.ssl_verify
-        )
-        return response.json()
+        self.logger.debug(f"Jira API Request: {url}")
+        self.logger.debug(f"Headers: {self.headers}")
+        self.logger.debug(f"Params: {params}")
+
+        try:
+            response = requests.get(
+                url, params=params, headers=self.headers, verify=self.ssl_verify
+            )
+
+            self.logger.debug(f"Jira API Response Status: {response.status_code}")
+            self.logger.debug(f"Response Headers: {response.headers}")
+            self.logger.debug(f"Response Body: {response.text}")
+
+            return response.json()
+        except Exception as e:
+            self.logger.error(f"Jira API Request failed: {e}")
+            raise
 
     def search(
         self, query: str, limit: int = 5, split_terms: bool = True
     ) -> Dict[str, Any]:
-        endpoint = "search"
-        if split_terms:
-            terms = [term.strip() for term in query.split() if term.strip()]
-            if terms:
-                cql_terms = " OR ".join([f'text ~ "{term}"' for term in terms])
-            else:
-                # Handle the case with no meaningful terms
-                cql_terms = f'text ~ "{query}"'
-        else:
-            cql_terms = f'text ~ "{query}"'
-        params = {"jql": f"{cql_terms}", "maxResults": limit}
-        rawResponse = self.get(endpoint, params)
-        response = []
-        for item in rawResponse["issues"]:
-            response.append(item["key"])
-        return response
+        # Use the new JQL endpoint instead of the deprecated one
+        endpoint = "search/jql"
+        params = {
+            "jql": query,
+            "maxResults": limit,
+            "fields": [
+                "summary",
+                "description",
+                "status",
+                "issuetype",
+                "priority",
+                "assignee",
+                "created",
+            ],
+        }
+        raw_response = self.get(endpoint, params)
+        
+        # Extract issues from the response
+        if "issues" not in raw_response:
+            return {"issues": []}
+            
+        return raw_response
 
     def get_issue(self, issue_key: str) -> Dict[str, Any]:
         """Get detailed information about a specific issue"""
@@ -693,6 +714,10 @@ class Tools:
             ge=BATCH_SIZE_MIN,
             le=BATCH_SIZE_MAX,
         )
+        debug: bool = Field(
+            False,
+            description="Enable debug logging for Jira API requests and responses",
+        )
         pass
 
     class UserValves(BaseModel):
@@ -728,6 +753,18 @@ class Tools:
         :return: A list of search results from Jira in JSON format with detailed information. If no results are found, an empty list is returned.
         """
         event_emitter = EventEmitter(__event_emitter__)
+
+        # Get the logger instance (OpenWebUI already configures this)
+        logger = logging.getLogger("jira_search")
+
+        # Set debug level if valves.debug is True
+        if self.valves.debug:
+            logger.setLevel(logging.DEBUG)
+        else:
+            logger.setLevel(logging.INFO)
+
+        # Ensure the logger doesn't propagate to root (optional, but safe)
+        logger.propagate = False
 
         try:
             # Get the username and API key
@@ -799,11 +836,37 @@ class Tools:
             )
 
             try:
-                issue_keys = jira.search(query, self.valves.result_limit, split_query)
+                # Use the new JQL endpoint instead of the deprecated one
+                endpoint = "search/jql"
+                params = {
+                    "jql": query,
+                    "maxResults": self.valves.result_limit,
+                    "fields": [
+                        "summary",
+                        "description",
+                        "status",
+                        "issuetype",
+                        "priority",
+                        "assignee",
+                        "created",
+                    ],
+                }
+
+                # Make the request to the new JQL endpoint
+                raw_response = jira.get(endpoint, params)
+
+                # Extract issues from the response
+                if "issues" not in raw_response or not raw_response["issues"]:
+                    await event_emitter.emit_status(
+                        f"No Jira issues found matching your query: '{query}'", True
+                    )
+                    return json.dumps([])
+
+                issue_keys = [issue["key"] for issue in raw_response["issues"]]
 
                 if not issue_keys:
                     await event_emitter.emit_status(
-                        f"No matching results found in Jira for '{query}'", True
+                        f"No Jira issues found matching your query: '{query}'", True
                     )
                     return json.dumps([])
 
@@ -943,6 +1006,13 @@ class Tools:
                         results.append(result)
                 else:
                     results = []
+
+                # Final check to ensure we have results
+                if not results:
+                    await event_emitter.emit_status(
+                        f"No relevant content found in Jira issues for '{query}'", True
+                    )
+                    return json.dumps([])
 
                 await event_emitter.emit_status(
                     f"Search complete! Found {len(results)} issues with information about '{query}'",
