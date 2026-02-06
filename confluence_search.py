@@ -6,7 +6,7 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn
-version: 0.5.0
+version: 0.6.0
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
@@ -25,6 +25,7 @@ changelog:
 - 0.3.0 - Add settings for ssl verification
 - 0.4.0 - Add support for included/exluded confluence spaces in user settings
 - 0.5.0 - Add optional Ollama embedding backend support (local Ollama instance)
+- 0.6.0 - Add OpenAI/LiteLLM-compatible embedding backend support
 """
 
 import base64
@@ -46,6 +47,11 @@ from sklearn.neighbors import NearestNeighbors
 RAG_EMBEDDING_BACKEND = os.environ.get("RAG_EMBEDDING_BACKEND", "sentence_transformers").lower()
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434") #change address to match your ollama instance
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "snowflake-arctic-embed2:568m") #change model to the one you use
+
+# Environment variables for OpenAI-compatible embedding API
+OPENAI_EMBEDDING_URL = os.environ.get("OPENAI_EMBEDDING_URL", "https://api.openai.com/v1/embeddings")
+OPENAI_EMBEDDING_API_KEY = os.environ.get("OPENAI_EMBEDDING_API_KEY", "")
+OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Get environment variables
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
@@ -386,6 +392,66 @@ class OllamaEmbeddingClient:
         return np.asarray(embeddings, dtype=float)
 
 
+class OpenAIEmbeddingClient:
+    """
+    Client for OpenAI-compatible embedding endpoints (OpenAI, LiteLLM, Azure, etc.).
+    Uses POST {url} with JSON: {"model": "<model>", "input": "<text>"}
+    """
+
+    def __init__(
+        self,
+        url: str = OPENAI_EMBEDDING_URL,
+        api_key: str = OPENAI_EMBEDDING_API_KEY,
+        model: str = OPENAI_EMBEDDING_MODEL,
+        timeout: int = 30,
+    ):
+        self.url = url.rstrip("/")
+        self.model = model
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+        if api_key:
+            self.session.headers.update({"Authorization": f"Bearer {api_key}"})
+        self.timeout = timeout
+
+    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+        payload = {"model": self.model, "input": texts}
+        try:
+            r = self.session.post(self.url, json=payload, timeout=self.timeout)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            raise ConfluenceModelError(
+                f"Failed to call OpenAI embeddings API at {self.url}: {e}"
+            )
+        try:
+            resp_json = r.json()
+        except ValueError:
+            raise ConfluenceModelError(
+                f"OpenAI embeddings endpoint returned non-JSON response: {r.text[:400]}"
+            )
+        # Standard OpenAI response: {"data": [{"embedding": [...], "index": 0}, ...]}
+        if "data" in resp_json and isinstance(resp_json["data"], list):
+            # Sort by index to ensure correct order
+            sorted_data = sorted(resp_json["data"], key=lambda x: x.get("index", 0))
+            return [item["embedding"] for item in sorted_data]
+        raise ConfluenceModelError(
+            "Unexpected OpenAI embeddings response format: "
+            + (str(resp_json)[:400] if resp_json is not None else "None")
+        )
+
+    def encode(self, texts):
+        """
+        Accepts either a single string or an iterable of strings.
+        Returns:
+          - for single string: 1D numpy array (dim,)
+          - for list of strings: 2D numpy array (n_texts, dim)
+        """
+        if isinstance(texts, str):
+            embeddings = self._embed_batch([texts])
+            return np.asarray(embeddings[0], dtype=float)
+        embeddings = self._embed_batch(list(texts))
+        return np.asarray(embeddings, dtype=float)
+
+
 class DenseRetriever:
     """Semantic search using document embeddings"""
 
@@ -561,6 +627,9 @@ class ConfluenceDocumentRetriever:
         embedding_backend: str = RAG_EMBEDDING_BACKEND,
         ollama_host: str = OLLAMA_HOST,
         ollama_model: str = OLLAMA_MODEL,
+        openai_url: str = OPENAI_EMBEDDING_URL,
+        openai_api_key: str = OPENAI_EMBEDDING_API_KEY,
+        openai_model: str = OPENAI_EMBEDDING_MODEL,
     ):
         self.device = device
         self.model_cache_dir = model_cache_dir
@@ -575,6 +644,9 @@ class ConfluenceDocumentRetriever:
         )
         self.ollama_host = ollama_host
         self.ollama_model = ollama_model
+        self.openai_url = openai_url
+        self.openai_api_key = openai_api_key
+        self.openai_model = openai_model
 
     async def load_embedding_model(self, event_emitter):
         """Load the embedding model for semantic search"""
@@ -593,16 +665,21 @@ class ConfluenceDocumentRetriever:
         # Choose backend
         try:
             if self.embedding_backend in ("ollama", "ollama_api", "ollama_embedding"):
-                # instantiate OllamaEmbeddingClient
-                # Wrap this in a lambda to maintain same asynchronous pattern
                 def load_ollama():
-                    client = OllamaEmbeddingClient(
+                    return OllamaEmbeddingClient(
                         host=self.ollama_host, model=self.ollama_model
                     )
-                    # quick test call for health (optional): skip to keep it lightweight
-                    return client
 
                 self.embedding_model = await asyncio.to_thread(load_ollama)
+            elif self.embedding_backend in ("openai", "litellm", "openai_api"):
+                def load_openai():
+                    return OpenAIEmbeddingClient(
+                        url=self.openai_url,
+                        api_key=self.openai_api_key,
+                        model=self.openai_model,
+                    )
+
+                self.embedding_model = await asyncio.to_thread(load_openai)
             else:
                 # fallback to sentence transformers
                 self.embedding_model = await asyncio.to_thread(
@@ -856,7 +933,7 @@ class Tools:
         )
         embedding_backend: str = Field(
             default=RAG_EMBEDDING_BACKEND,
-            description='Which embedding backend to use. Allowed values: "ollama", "sentence_transformers".',
+            description='Which embedding backend to use. Allowed values: "sentence_transformers", "ollama", "openai".',
         )
         embedding_model_name: str = Field(
             DEFAULT_EMBEDDING_MODEL,
@@ -869,6 +946,18 @@ class Tools:
         ollama_model_name: str = Field(
             default=OLLAMA_MODEL,
             description="Name of the Ollama embedding model (used when embedding_backend='ollama')",
+        )
+        openai_embedding_url: str = Field(
+            default=OPENAI_EMBEDDING_URL,
+            description="URL of the OpenAI-compatible embeddings endpoint (used when embedding_backend='openai')",
+        )
+        openai_embedding_api_key: str = Field(
+            default=OPENAI_EMBEDDING_API_KEY,
+            description="API key for the OpenAI-compatible embeddings endpoint (used when embedding_backend='openai')",
+        )
+        openai_embedding_model: str = Field(
+            default=OPENAI_EMBEDDING_MODEL,
+            description="Model name for the OpenAI-compatible embeddings endpoint (used when embedding_backend='openai')",
         )
         cpu_only: bool = Field(
             default=True, 
@@ -1040,7 +1129,6 @@ class Tools:
             # Initialize document retriever and load model with proper error handling
             try:
                 if not self.document_retriever:
-                    # pass embedding backend and ollama info from valves
                     self.document_retriever = ConfluenceDocumentRetriever(
                         model_cache_dir=model_cache_dir,
                         device="cpu" if self.valves.cpu_only else "cuda",
@@ -1049,6 +1137,9 @@ class Tools:
                         embedding_backend=self.valves.embedding_backend,
                         ollama_host=self.valves.ollama_host,
                         ollama_model=self.valves.ollama_model_name,
+                        openai_url=self.valves.openai_embedding_url,
+                        openai_api_key=self.valves.openai_embedding_api_key,
+                        openai_model=self.valves.openai_embedding_model,
                     )
 
                 if not self.document_retriever.embedding_model:

@@ -6,7 +6,7 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn
-version: 0.3.0
+version: 0.4.0
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Implement Jira search
@@ -15,6 +15,7 @@ changelog:
 - 0.1.2 - Add terms splitting option
 - 0.2.0 - Add setting for SSL verification
 - 0.3.0 - Implement RAG (Retrieval Augmented Generation) for better search results
+- 0.4.0 - Add OpenAI/LiteLLM-compatible embedding backend support
 """
 
 import base64
@@ -30,6 +31,12 @@ from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from sklearn.neighbors import NearestNeighbors
+
+# Environment variables for OpenAI-compatible embedding API
+OPENAI_EMBEDDING_URL = os.environ.get("OPENAI_EMBEDDING_URL", "https://api.openai.com/v1/embeddings")
+OPENAI_EMBEDDING_API_KEY = os.environ.get("OPENAI_EMBEDDING_API_KEY", "")
+OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+RAG_EMBEDDING_BACKEND = os.environ.get("RAG_EMBEDDING_BACKEND", "sentence_transformers").lower()
 
 # Get environment variables
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
@@ -230,6 +237,65 @@ def filter_similar_embeddings(
     return list(sorted(included_idxs))
 
 
+class OpenAIEmbeddingClient:
+    """
+    Client for OpenAI-compatible embedding endpoints (OpenAI, LiteLLM, Azure, etc.).
+    Uses POST {url} with JSON: {"model": "<model>", "input": "<text>"}
+    """
+
+    def __init__(
+        self,
+        url: str = OPENAI_EMBEDDING_URL,
+        api_key: str = OPENAI_EMBEDDING_API_KEY,
+        model: str = OPENAI_EMBEDDING_MODEL,
+        timeout: int = 30,
+    ):
+        self.url = url.rstrip("/")
+        self.model = model
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+        if api_key:
+            self.session.headers.update({"Authorization": f"Bearer {api_key}"})
+        self.timeout = timeout
+
+    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+        payload = {"model": self.model, "input": texts}
+        try:
+            r = self.session.post(self.url, json=payload, timeout=self.timeout)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            raise Exception(
+                f"Failed to call OpenAI embeddings API at {self.url}: {e}"
+            )
+        try:
+            resp_json = r.json()
+        except ValueError:
+            raise Exception(
+                f"OpenAI embeddings endpoint returned non-JSON response: {r.text[:400]}"
+            )
+        # Standard OpenAI response: {"data": [{"embedding": [...], "index": 0}, ...]}
+        if "data" in resp_json and isinstance(resp_json["data"], list):
+            sorted_data = sorted(resp_json["data"], key=lambda x: x.get("index", 0))
+            return [item["embedding"] for item in sorted_data]
+        raise Exception(
+            "Unexpected OpenAI embeddings response format: "
+            + (str(resp_json)[:400] if resp_json is not None else "None")
+        )
+
+    def encode(self, texts):
+        """
+        Accepts either a single string or an iterable of strings.
+        Returns:
+          - for single string: 1D numpy array (dim,)
+          - for list of strings: 2D numpy array (n_texts, dim)
+        """
+        if isinstance(texts, str):
+            embeddings = self._embed_batch([texts])
+            return np.asarray(embeddings[0], dtype=float)
+        embeddings = self._embed_batch(list(texts))
+        return np.asarray(embeddings, dtype=float)
+
+
 class DenseRetriever:
     """Semantic search using document embeddings"""
 
@@ -395,6 +461,10 @@ class JiraDocumentRetriever:
         device: str = "cpu",
         embedding_model_name: str = DEFAULT_EMBEDDING_MODEL,
         batch_size: int = BATCH_SIZE,
+        embedding_backend: str = RAG_EMBEDDING_BACKEND,
+        openai_url: str = OPENAI_EMBEDDING_URL,
+        openai_api_key: str = OPENAI_EMBEDDING_API_KEY,
+        openai_model: str = OPENAI_EMBEDDING_MODEL,
     ):
         self.device = device
         self.model_cache_dir = model_cache_dir
@@ -404,14 +474,20 @@ class JiraDocumentRetriever:
         self.text_splitter = TextSplitter(
             chunk_size=DEFAULT_CHUNK_SIZE, chunk_overlap=DEFAULT_CHUNK_OVERLAP
         )
+        self.embedding_backend = (
+            embedding_backend.lower() if embedding_backend else "sentence_transformers"
+        )
+        self.openai_url = openai_url
+        self.openai_api_key = openai_api_key
+        self.openai_model = openai_model
 
     async def load_embedding_model(self, event_emitter):
         """Load the embedding model for semantic search"""
         await event_emitter.emit_status(
-            f"Loading embedding model {self.embedding_model_name}...", False
+            f"Loading embedding model (backend={self.embedding_backend})...", False
         )
 
-        def load_model():
+        def load_sentence_transformer():
             return SentenceTransformer(
                 self.embedding_model_name,
                 cache_folder=self.model_cache_dir,
@@ -419,8 +495,18 @@ class JiraDocumentRetriever:
                 trust_remote_code=RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
             )
 
-        # Run in an executor to avoid blocking the event loop
-        self.embedding_model = await asyncio.to_thread(load_model)
+        if self.embedding_backend in ("openai", "litellm", "openai_api"):
+            def load_openai():
+                return OpenAIEmbeddingClient(
+                    url=self.openai_url,
+                    api_key=self.openai_api_key,
+                    model=self.openai_model,
+                )
+
+            self.embedding_model = await asyncio.to_thread(load_openai)
+        else:
+            # Default to sentence transformers
+            self.embedding_model = await asyncio.to_thread(load_sentence_transformer)
 
         return self.embedding_model
 
@@ -635,9 +721,25 @@ class Tools:
             DEFAULT_MODEL_CACHE_DIR,
             description="Path to the folder in which embedding models will be saved",
         )
+        embedding_backend: str = Field(
+            default=RAG_EMBEDDING_BACKEND,
+            description='Which embedding backend to use. Allowed values: "sentence_transformers", "openai".',
+        )
         embedding_model_name: str = Field(
             DEFAULT_EMBEDDING_MODEL,
-            description="Name or path of the embedding model to use",
+            description="Name or path of the embedding model to use (used for sentence-transformers backend)",
+        )
+        openai_embedding_url: str = Field(
+            default=OPENAI_EMBEDDING_URL,
+            description="URL of the OpenAI-compatible embeddings endpoint (used when embedding_backend='openai')",
+        )
+        openai_embedding_api_key: str = Field(
+            default=OPENAI_EMBEDDING_API_KEY,
+            description="API key for the OpenAI-compatible embeddings endpoint (used when embedding_backend='openai')",
+        )
+        openai_embedding_model: str = Field(
+            default=OPENAI_EMBEDDING_MODEL,
+            description="Model name for the OpenAI-compatible embeddings endpoint (used when embedding_backend='openai')",
         )
         cpu_only: bool = Field(default=True, description="Run the tool on CPU only")
         chunk_size: int = Field(
@@ -776,6 +878,10 @@ class Tools:
                         device="cpu" if self.valves.cpu_only else "cuda",
                         embedding_model_name=self.valves.embedding_model_name,
                         batch_size=BATCH_SIZE,
+                        embedding_backend=self.valves.embedding_backend,
+                        openai_url=self.valves.openai_embedding_url,
+                        openai_api_key=self.valves.openai_embedding_api_key,
+                        openai_model=self.valves.openai_embedding_model,
                     )
 
                 if not self.document_retriever.embedding_model:
