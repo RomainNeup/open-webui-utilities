@@ -6,7 +6,7 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify, sentence-transformers, numpy, rank_bm25, scikit-learn
-version: 0.5.0
+version: 0.5.1
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
@@ -25,6 +25,7 @@ changelog:
 - 0.3.0 - Add settings for ssl verification
 - 0.4.0 - Add support for included/exluded confluence spaces in user settings
 - 0.5.0 - Add optional Ollama embedding backend support (local Ollama instance)
+- 0.5.1 - Use SENTENCE_TRANSFORMERS_HOME env var for model cache path
 """
 
 import base64
@@ -66,8 +67,13 @@ MAX_PAGE_SIZE = int(os.environ.get("RAG_FILE_MAX_SIZE", "10000"))
 BATCH_SIZE = int(os.environ.get("RAG_FILE_MAX_COUNT", "16"))
 
 # Read cache dir from environment
+# Prefer SENTENCE_TRANSFORMERS_HOME (set by Open WebUI) so pre-downloaded
+# models are reused, especially in air-gapped environments.
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cache")
-DEFAULT_MODEL_CACHE_DIR = os.path.join(CACHE_DIR, "sentence_transformers")
+DEFAULT_MODEL_CACHE_DIR = os.environ.get(
+    "SENTENCE_TRANSFORMERS_HOME",
+    os.path.join(CACHE_DIR, "sentence_transformers"),
+)
 
 # Additional constant values
 DEFAULT_RRF_CONSTANT = 60
