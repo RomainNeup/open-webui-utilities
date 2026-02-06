@@ -37,7 +37,10 @@ This tool searches for Confluence pages using a given query string with RAG (Ret
     - Result Limit: Maximum number of pages to retrieve from Confluence API
     - RAG Settings:
         - embedding_model_save_path: Path to save embedding models
-        - embedding_model_name: Name/path of the embedding model to use
+        - embedding_backend: Which embedding backend to use. Allowed values: "ollama", "sentence_transformers"
+        - embedding_model_name: Name/path of the embedding model to use (used for sentence-transformers backend)
+        - ollama_host: Base URL of local Ollama server (used when embedding_backend='ollama')
+        - ollama_model_name: Name of the Ollama embedding model (used when embedding_backend='ollama')
         - cpu_only: Run the tool on CPU only (vs GPU)
         - chunk_size: Maximum size of each content chunk for processing
         - chunk_overlap: Overlap between consecutive chunks
