@@ -44,7 +44,7 @@ from sklearn.neighbors import NearestNeighbors
 
 # New environment variables for Ollama / backend selection
 RAG_EMBEDDING_BACKEND = os.environ.get("RAG_EMBEDDING_BACKEND", "ollama").lower()
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434") #change address to match you're ollama instance
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434") #change address to match your ollama instance
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "snowflake-arctic-embed2:568m") #change model to the one you use
 
 # Get environment variables
