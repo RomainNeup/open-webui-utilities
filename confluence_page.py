@@ -6,17 +6,19 @@ author: @romainneup
 author_url: https://github.com/RomainNeup
 funding_url: https://github.com/sponsors/RomainNeup
 requirements: markdownify
-version: 0.2.0
+version: 0.2.1
 changelog:
 - 0.0.1 - Initial code base.
 - 0.0.2 - Fix Valves variables
 - 0.1.0 - Split Confuence search and Confluence get page
 - 0.1.1 - Add support for Personal Access Token authentication and user settings
 - 0.2.0 - Add setting for SSL verification
+- 0.2.1 - Add option to strip base64/all images from page content to save context
 """
 
 import base64
 import json
+import re
 import requests
 from typing import Awaitable, Callable, Dict, Any
 from pydantic import BaseModel, Field
@@ -56,6 +58,19 @@ class EventEmitter:
         )
 
 
+def strip_images(text: str, strip_all: bool = False) -> str:
+    """Remove image content from markdown text.
+    If strip_all is True, removes all markdown images.
+    Otherwise, only removes base64 data URI images."""
+    if strip_all:
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+    else:
+        text = re.sub(r"!\[[^\]]*\]\(data:[^)]+\)", "", text)
+    # Clean up excessive blank lines left behind
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
 class Confluence:
     def __init__(
         self, username: str, api_key: str, base_url: str, api_key_auth: bool = True, ssl_verify: bool = True
@@ -72,14 +87,22 @@ class Confluence:
             raise Exception(f"Failed to get data from Confluence: {response.text}")
         return response.json()
 
-    def get_page(self, page_id: str) -> Dict[str, Any]:
+    def get_page(self, page_id: str, strip_images_mode: str = "none") -> Dict[str, Any]:
         endpoint = f"content/{page_id}"
         params = {"expand": "body.view", "include-version": "false"}
         result = self.get(endpoint, params)
+        body = markdownify(result["body"]["view"]["value"])
+
+        # Strip images if configured
+        if strip_images_mode == "all":
+            body = strip_images(body, strip_all=True)
+        elif strip_images_mode == "base64":
+            body = strip_images(body, strip_all=False)
+
         return {
             "id": result["id"],
             "title": result["title"],
-            "body": markdownify(result["body"]["view"]["value"]),
+            "body": body,
             "link": f"{self.base_url}{result['_links']['webui']}",
         }
 
@@ -118,8 +141,14 @@ class Tools:
             "ABCD1234", description="Default API key or personal access token"
         )
         ssl_verify: bool = Field(
-            True, 
+            True,
             description="SSL verification"
+        )
+        strip_images: str = Field(
+            default="base64",
+            description="Strip images from page content to save context. "
+            "'none' = keep all images, 'base64' = strip only embedded base64 images, "
+            "'all' = strip all images.",
         )
         pass
 
@@ -176,7 +205,7 @@ class Tools:
         
         await event_emitter.emit_status(f"Retrieving page '{page_id}' from Confluence...", False)
         try:
-            result = confluence.get_page(page_id)
+            result = confluence.get_page(page_id, self.valves.strip_images)
             await event_emitter.emit_status(f"Retrieved page '{page_id}' from Confluence.", True)
             await event_emitter.emit_source(result["title"], result["link"], result["body"])
             return json.dumps(result)

@@ -25,11 +25,14 @@ changelog:
 - 0.3.0 - Add settings for ssl verification
 - 0.4.0 - Add support for included/exluded confluence spaces in user settings
 - 0.5.0 - Add optional Ollama embedding backend support (local Ollama instance)
+- 0.5.1 - Use SENTENCE_TRANSFORMERS_HOME env var for model cache path
+- 0.5.2 - Add option to strip base64/all images from page content to save context
 - 0.6.0 - Add OpenAI/LiteLLM-compatible embedding backend support
 """
 
 import base64
 import json
+import re
 import requests
 import asyncio
 import numpy as np
@@ -72,8 +75,13 @@ MAX_PAGE_SIZE = int(os.environ.get("RAG_FILE_MAX_SIZE", "10000"))
 BATCH_SIZE = int(os.environ.get("RAG_FILE_MAX_COUNT", "16"))
 
 # Read cache dir from environment
+# Prefer SENTENCE_TRANSFORMERS_HOME (set by Open WebUI) so pre-downloaded
+# models are reused, especially in air-gapped environments.
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/cache")
-DEFAULT_MODEL_CACHE_DIR = os.path.join(CACHE_DIR, "sentence_transformers")
+DEFAULT_MODEL_CACHE_DIR = os.environ.get(
+    "SENTENCE_TRANSFORMERS_HOME",
+    os.path.join(CACHE_DIR, "sentence_transformers"),
+)
 
 # Additional constant values
 DEFAULT_RRF_CONSTANT = 60
@@ -102,6 +110,19 @@ DEFAULT_API_RESULT_LIMIT = 5
 
 
 # Custom exceptions for better error handling
+def strip_images(text: str, strip_all: bool = False) -> str:
+    """Remove image content from markdown text.
+    If strip_all is True, removes all markdown images.
+    Otherwise, only removes base64 data URI images."""
+    if strip_all:
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text)
+    else:
+        text = re.sub(r"!\[[^\]]*\]\(data:[^)]+\)", "", text)
+    # Clean up excessive blank lines left behind
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
 class ConfluenceError(Exception):
     """Base exception for Confluence-related errors"""
 
@@ -859,14 +880,23 @@ class Confluence:
         raw_response = self.get(endpoint, params)
         return [item["id"] for item in raw_response.get("results", [])]
 
-    def get_page(self, page_id: str) -> Dict[str, str]:
-        """Get a specific Confluence page by ID"""
+    def get_page(self, page_id: str, strip_images_mode: str = "none") -> Dict[str, str]:
+        """Get a specific Confluence page by ID.
+        strip_images_mode: 'none', 'base64' (only data URIs), or 'all' (all images)
+        """
         endpoint = f"content/{page_id}"
         params = {"expand": "body.view", "include-version": "false"}
         result = self.get(endpoint, params)
 
         # Get page content and limit size if needed
         body = markdownify(result["body"]["view"]["value"])
+
+        # Strip images if configured
+        if strip_images_mode == "all":
+            body = strip_images(body, strip_all=True)
+        elif strip_images_mode == "base64":
+            body = strip_images(body, strip_all=False)
+
         if len(body) > MAX_PAGE_SIZE:
             body = body[:MAX_PAGE_SIZE]
 
@@ -1015,6 +1045,12 @@ class Tools:
             description="Number of documents to process at once for embedding",
             ge=BATCH_SIZE_MIN,
             le=BATCH_SIZE_MAX,
+        )
+        strip_images: str = Field(
+            default="base64",
+            description="Strip images from page content to save context. "
+            "'none' = keep all images, 'base64' = strip only embedded base64 images, "
+            "'all' = strip all images.",
         )
         pass
 
@@ -1200,7 +1236,7 @@ class Tools:
                 await event_emitter.emit_status(
                     f"Retrieving Confluence page {i+1}/{len(searchResponse)}...", False
                 )
-                page = confluence.get_page(item)
+                page = confluence.get_page(item, self.valves.strip_images)
                 raw_documents.append(
                     Document(
                         page_content=page["body"],
