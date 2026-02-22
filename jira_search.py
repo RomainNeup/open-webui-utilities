@@ -15,7 +15,8 @@ changelog:
 - 0.1.2 - Add terms splitting option
 - 0.2.0 - Add setting for SSL verification
 - 0.3.0 - Implement RAG (Retrieval Augmented Generation) for better search results
-- 0.3.1 - Use SENTENCE_TRANSFORMERS_HOME env var for model cache path
+- 0.3.1 - Fix unhelpful error message when Jira API returns an error response
+- 0.3.2 - Use SENTENCE_TRANSFORMERS_HOME env var for model cache path
 """
 
 import base64
@@ -525,6 +526,10 @@ class Jira:
         response = requests.get(
             url, params=params, headers=self.headers, verify=self.ssl_verify
         )
+        if response.status_code == 401:
+            raise Exception("Authentication failed. Check your credentials.")
+        elif not response.ok:
+            raise Exception(f"Jira API error ({response.status_code}): {response.text}")
         return response.json()
 
     def search(
@@ -542,6 +547,11 @@ class Jira:
             cql_terms = f'text ~ "{query}"'
         params = {"jql": f"{cql_terms}", "maxResults": limit}
         rawResponse = self.get(endpoint, params)
+        if "issues" not in rawResponse:
+            error_messages = rawResponse.get("errorMessages", [])
+            errors = rawResponse.get("errors", {})
+            detail = "; ".join(error_messages) if error_messages else str(errors) if errors else str(rawResponse)
+            raise Exception(f"Jira search failed: {detail}")
         response = []
         for item in rawResponse["issues"]:
             response.append(item["key"])
